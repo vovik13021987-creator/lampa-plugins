@@ -24,4 +24,231 @@
         Lampa.Storage.set(KEY, l);
     }
     function unhide(d) {
-        Lampa.Storage.set(KEY, getList().fil
+        Lampa.Storage.set(KEY, getList().filter(function (x) { return x !== key(d); }));
+    }
+
+    // ===== ФІЛЬТР ПО КРАЇНІ =====
+    function countryFilterOn() {
+        var v = Lampa.Storage.get('hide_ru', 'true');
+        return v === true || v === 'true';
+    }
+
+    var cache = Lampa.Storage.get('hide_cn_cache', '{}');
+    if (!cache || typeof cache !== 'object' || Array.isArray(cache)) cache = {};
+    var pending = {};
+
+    function inBlocked(code) { return BLOCKED.indexOf(code) !== -1; }
+
+    // true / false / null (країна невідома)
+    function countryBlocked(d) {
+        var oc = d.origin_country;
+        if (Array.isArray(oc) && oc.length) return oc.some(inBlocked);
+        var pc = d.production_countries;
+        if (Array.isArray(pc) && pc.length) {
+            return pc.some(function (c) { return inBlocked(c.iso_3166_1); });
+        }
+        return null;
+    }
+
+    function fetchCountry(d, k) {
+        if (pending[k]) return;
+        pending[k] = 1;
+        try {
+            var url = Lampa.TMDB.api((isTv(d) ? 'tv/' : 'movie/') + d.id +
+                      '?api_key=' + Lampa.TMDB.key() + '&language=en');
+            $.getJSON(url, function (r) {
+                var bad = countryBlocked(r) === true;
+                cache[k] = bad ? 1 : 0;
+                Lampa.Storage.set('hide_cn_cache', cache);
+                if (bad) sweep();
+            });
+        } catch (e) { console.log('[hide_movie] tmdb', e); }
+    }
+
+    function isBlockedCountry(d) {
+        if (!countryFilterOn() || !d || !d.id) return false;
+        var r = countryBlocked(d);
+        if (r !== null) return r;
+        var k = key(d);
+        if (k in cache) return cache[k] === 1;
+        fetchCountry(d, k);
+        return false;
+    }
+
+    // ===== ПОШУК ДАНИХ КАРТКИ =====
+    function looksLikeMovie(v) {
+        return v && typeof v === 'object' && v.id &&
+            (v.title || v.name || v.original_title || v.original_name);
+    }
+
+    function fromValue(v) {
+        if (looksLikeMovie(v)) return v;
+        if (v && typeof v === 'object') {
+            var sub = [v.data, v.card_data, v.item, v.card, v.movie];
+            for (var i = 0; i < sub.length; i++) if (looksLikeMovie(sub[i])) return sub[i];
+        }
+        return null;
+    }
+
+    function cardData(el) {
+        if (!el) return null;
+        var found = null, k;
+        try {
+            var jd = $(el).data() || {};
+            for (k in jd) { found = fromValue(jd[k]); if (found) return found; }
+        } catch (e) {}
+        for (k in el) {
+            try { found = fromValue(el[k]); if (found) return found; } catch (e) {}
+        }
+        return null;
+    }
+
+    function debugInfo(el) {
+        if (!el) return 'Картку не визначено';
+        var own = [], jd = [];
+        try { for (var k in el) if (/card|data|item|movie/i.test(k)) own.push(k); } catch (e) {}
+        try { jd = Object.keys($(el).data() || {}); } catch (e) {}
+        return 'Дані не знайдено. el: [' + own.join(',') + '] jq: [' + jd.join(',') + ']';
+    }
+
+    // ===== ПРИБИРАННЯ КАРТОК =====
+    function sweep() {
+        $('.card').each(function () {
+            var d = cardData(this);
+            if (d && (isHidden(d) || isBlockedCountry(d))) $(this).remove();
+        });
+    }
+
+    var timer;
+    function startObserver() {
+        new MutationObserver(function () {
+            clearTimeout(timer);
+            timer = setTimeout(sweep, 100);
+        }).observe(document.body, { childList: true, subtree: true });
+    }
+
+    // ===== ПУНКТ "СХОВАТИ" У МЕНЮ КАРТКИ =====
+    function track(e) {
+        var c = $(e.target).closest('.card')[0];
+        if (c) { lastCard = c; lastTime = Date.now(); }
+    }
+    document.addEventListener('touchstart', track, true);
+    document.addEventListener('mousedown', track, true);
+    document.addEventListener('contextmenu', track, true);
+
+    function currentCard() {
+        var f = $('.card.focus').last()[0];
+        if (f) return f;
+        if (lastCard && Date.now() - lastTime < 8000) return lastCard;
+        return null;
+    }
+
+    function patchSelect() {
+        if (!Lampa.Select || Lampa.Select._hide_patched) return;
+        var orig = Lampa.Select.show;
+        Lampa.Select._hide_patched = true;
+
+        Lampa.Select.show = function (params) {
+            try {
+                if (params && Array.isArray(params.items) && params.items.length &&
+                    !params.items.some(function (i) { return i.hide_movie; })) {
+
+                    var el = currentCard();
+                    if (el) {
+                        var d = cardData(el);
+                        var $el = $(el);
+                        if (d) {
+                            params.items.push({
+                                title: isHidden(d) ? 'Показувати фільм' : 'Сховати фільм',
+                                hide_movie: true,
+                                onSelect: function () {
+                                    if (isHidden(d)) {
+                                        unhide(d);
+                                        Lampa.Noty.show('Фільм знову буде показуватись');
+                                    } else {
+                                        hide(d);
+                                        $el.remove();
+                                        Lampa.Noty.show('Фільм сховано');
+                                    }
+                                }
+                            });
+                        } else {
+                            params.items.push({
+                                title: 'Сховати: діагностика',
+                                hide_movie: true,
+                                onSelect: function () { Lampa.Noty.show(debugInfo(el)); }
+                            });
+                        }
+                    }
+                }
+            } catch (e) { console.log('[hide_movie]', e); }
+            return orig.apply(this, arguments);
+        };
+    }
+
+    // ===== КНОПКА НА СТОРІНЦІ ФІЛЬМУ =====
+    Lampa.Listener.follow('full', function (e) {
+        if (e.type !== 'complite') return;
+
+        var movie = e.data.movie;
+        var render = e.object.activity.render();
+        var container = render.find('.full-start-new__buttons, .full-start__buttons').eq(0);
+        if (!container.length || render.find('.button--hide-movie').length) return;
+
+        var btn = $('<div class="full-start__button selector button--hide-movie"><span></span></div>');
+        function refresh() { btn.find('span').text(isHidden(movie) ? 'Показувати' : 'Сховати'); }
+
+        btn.on('hover:enter', function () {
+            if (isHidden(movie)) {
+                unhide(movie);
+                Lampa.Noty.show('Фільм знову буде показуватись');
+            } else {
+                hide(movie);
+                Lampa.Noty.show('Фільм сховано');
+                Lampa.Activity.backward();
+            }
+            refresh();
+        });
+
+        refresh();
+        container.append(btn);
+    });
+
+    // ===== НАЛАШТУВАННЯ В LAMPA =====
+    try {
+        Lampa.SettingsApi.addParam({
+            component: 'more',
+            param: { name: 'hide_ru', type: 'trigger', default: true },
+            field: {
+                name: 'Ховати контент за країнами',
+                description: 'Країни виробництва: ' + BLOCKED.join(', ')
+            },
+            onChange: function () { sweep(); }
+        });
+    } catch (e) {}
+
+    try {
+        Lampa.SettingsApi.addParam({
+            component: 'more',
+            param: { name: 'hide_movie_clear', type: 'static' },
+            field: { name: 'Сховані фільми: очистити', description: 'Показати знову всі вручну сховані фільми' },
+            onRender: function (item) {
+                item.on('hover:enter', function () {
+                    Lampa.Storage.set(KEY, []);
+                    Lampa.Noty.show('Список схованих очищено');
+                });
+            }
+        });
+    } catch (e) {}
+
+    // ===== ЗАПУСК =====
+    function init() {
+        patchSelect();
+        startObserver();
+        sweep();
+        setInterval(sweep, 1500);
+    }
+
+    if (window.appready) init();
+    else Lampa.Listener.follow('app', function (e) { if (e.type === 'ready') init(); });
+})();
