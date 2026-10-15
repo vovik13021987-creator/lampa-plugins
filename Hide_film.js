@@ -2,6 +2,7 @@
     'use strict';
 
     var KEY = 'hide_movie_list';
+    var lastCard = null, lastTime = 0;
 
     function getList() {
         var l = Lampa.Storage.get(KEY, '[]');
@@ -21,12 +22,39 @@
         Lampa.Storage.set(KEY, getList().filter(function (x) { return x !== key(d); }));
     }
 
-    function cardData(el) {
-        var $el = $(el);
-        var d = el.card_data || $el.data('card') || $el.data('item') || $el.data('data') ||
-                $el.data('card_data') || el.item || el.data || null;
-        if (d && typeof d === 'object' && d.id) return d;
+    function looksLikeMovie(v) {
+        return v && typeof v === 'object' && v.id &&
+            (v.title || v.name || v.original_title || v.original_name);
+    }
+
+    function fromValue(v) {
+        if (looksLikeMovie(v)) return v;
+        if (v && typeof v === 'object') {
+            var sub = [v.data, v.card_data, v.item, v.card, v.movie];
+            for (var i = 0; i < sub.length; i++) if (looksLikeMovie(sub[i])) return sub[i];
+        }
         return null;
+    }
+
+    function cardData(el) {
+        if (!el) return null;
+        var found = null, k;
+        try {
+            var jd = $(el).data() || {};
+            for (k in jd) { found = fromValue(jd[k]); if (found) return found; }
+        } catch (e) {}
+        for (k in el) {
+            try { found = fromValue(el[k]); if (found) return found; } catch (e) {}
+        }
+        return null;
+    }
+
+    function debugInfo(el) {
+        if (!el) return 'Картку не визначено';
+        var own = [], jd = [];
+        try { for (var k in el) if (/card|data|item|movie/i.test(k)) own.push(k); } catch (e) {}
+        try { jd = Object.keys($(el).data() || {}); } catch (e) {}
+        return 'Дані не знайдено. el: [' + own.join(',') + '] jq: [' + jd.join(',') + ']';
     }
 
     function sweep() {
@@ -44,6 +72,22 @@
         }).observe(document.body, { childList: true, subtree: true });
     }
 
+    // запам'ятовуємо останню картку, з якою взаємодіяли
+    function track(e) {
+        var c = $(e.target).closest('.card')[0];
+        if (c) { lastCard = c; lastTime = Date.now(); }
+    }
+    document.addEventListener('touchstart', track, true);
+    document.addEventListener('mousedown', track, true);
+    document.addEventListener('contextmenu', track, true);
+
+    function currentCard() {
+        var f = $('.card.focus').last()[0];
+        if (f) return f;
+        if (lastCard && Date.now() - lastTime < 8000) return lastCard;
+        return null;
+    }
+
     function patchSelect() {
         if (!Lampa.Select || Lampa.Select._hide_patched) return;
         var orig = Lampa.Select.show;
@@ -51,27 +95,36 @@
 
         Lampa.Select.show = function (params) {
             try {
-                var el = $('.card.focus').last()[0];
-                var d = el && cardData(el);
-                var isContext = params && Array.isArray(params.items) && params.items.length &&
-                                !params.items.some(function (i) { return i.hide_movie; });
+                if (params && Array.isArray(params.items) && params.items.length &&
+                    !params.items.some(function (i) { return i.hide_movie; })) {
 
-                if (d && isContext) {
-                    var $el = $(el);
-                    params.items.push({
-                        title: isHidden(d) ? 'Показувати фільм' : 'Сховати фільм',
-                        hide_movie: true,
-                        onSelect: function () {
-                            if (isHidden(d)) {
-                                unhide(d);
-                                Lampa.Noty.show('Фільм знову буде показуватись');
-                            } else {
-                                hide(d);
-                                $el.remove();
-                                Lampa.Noty.show('Фільм сховано');
-                            }
+                    var el = currentCard();
+                    if (el) {
+                        var d = cardData(el);
+                        var $el = $(el);
+                        if (d) {
+                            params.items.push({
+                                title: isHidden(d) ? 'Показувати фільм' : 'Сховати фільм',
+                                hide_movie: true,
+                                onSelect: function () {
+                                    if (isHidden(d)) {
+                                        unhide(d);
+                                        Lampa.Noty.show('Фільм знову буде показуватись');
+                                    } else {
+                                        hide(d);
+                                        $el.remove();
+                                        Lampa.Noty.show('Фільм сховано');
+                                    }
+                                }
+                            });
+                        } else {
+                            params.items.push({
+                                title: 'Сховати: діагностика',
+                                hide_movie: true,
+                                onSelect: function () { Lampa.Noty.show(debugInfo(el)); }
+                            });
                         }
-                    });
+                    }
                 }
             } catch (e) { console.log('[hide_movie]', e); }
             return orig.apply(this, arguments);
