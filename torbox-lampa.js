@@ -1,224 +1,127 @@
+/* TorBox for Lampa — experimental. Enter your own API key in Lampa settings. */
 (function () {
     'use strict';
+    if (window.__torbox_lampa_fixed) return;
+    window.__torbox_lampa_fixed = true;
 
-    if (window.torbox_lampa_plugin_started) return;
-    window.torbox_lampa_plugin_started = true;
-
-    var PLUGIN_ID = 'torbox_lampa';
+    var COMPONENT = 'torbox_lampa';
+    var KEY_NAME = 'torbox_lampa_api_key';
     var API = 'https://api.torbox.app/v1/api';
-    var settings = {
-        api_key: 'torbox_lampa_api_key'
-    };
 
-    function notify(message) {
-        if (window.Lampa && Lampa.Noty) Lampa.Noty.show(message);
-        else window.alert(message);
+    function notice(message) {
+        if (window.Lampa && Lampa.Noty && Lampa.Noty.show) Lampa.Noty.show(message);
+        else if (window.console) console.log('[TorBox Lampa] ' + message);
     }
-
-    function key() {
-        return (Lampa.Storage.get(settings.api_key, '') || '').trim();
+    function getKey() {
+        try { return String(Lampa.Storage.get(KEY_NAME, '') || '').trim(); }
+        catch (e) { return ''; }
     }
-
-    function request(url, method, data, done, fail) {
-        var headers = { 'Authorization': 'Bearer ' + key() };
-        var options = {
-            url: url,
-            method: method || 'GET',
-            data: data || {},
-            headers: headers,
-            dataType: 'json',
-            timeout: 20000,
-            success: function (response) { done(response); },
-            error: function (error) {
-                var msg = 'Помилка запиту TorBox';
-                if (error && error.responseText) {
-                    try {
-                        var parsed = JSON.parse(error.responseText);
-                        msg = parsed.detail || parsed.error || msg;
-                    } catch (e) {}
-                }
-                if (fail) fail(msg);
-                else notify(msg);
-            }
-        };
-
+    function request(path, success, failure) {
+        var token = getKey();
+        if (!token) { failure('Введіть API key у Налаштування → TorBox.'); return; }
         try {
-            new Lampa.Reguest().native(options);
-        } catch (e) {
-            // Compatibility fallback for Lampa builds with the older request API.
-            try {
-                new Lampa.Reguest().get(url, function (response) {
-                    done(response);
-                }, function () {
-                    if (fail) fail('Не вдалося з’єднатися з TorBox');
-                    else notify('Не вдалося з’єднатися з TorBox');
-                }, options);
-            } catch (e2) {
-                if (fail) fail('Ця версія Lampa не підтримує потрібний HTTP-запит');
-                else notify('Ця версія Lampa не підтримує потрібний HTTP-запит');
-            }
-        }
+            var xhr = new XMLHttpRequest();
+            xhr.open('GET', API + path, true);
+            xhr.timeout = 20000;
+            xhr.setRequestHeader('Authorization', 'Bearer ' + token);
+            xhr.setRequestHeader('Accept', 'application/json');
+            xhr.onreadystatechange = function () {
+                if (xhr.readyState !== 4) return;
+                if (xhr.status >= 200 && xhr.status < 300) {
+                    try { success(JSON.parse(xhr.responseText)); }
+                    catch (e) { failure('TorBox повернув некоректну відповідь.'); }
+                } else {
+                    var message = 'Помилка TorBox HTTP ' + xhr.status;
+                    try { var data = JSON.parse(xhr.responseText); message = data.detail || data.error || message; } catch (e) {}
+                    failure(message);
+                }
+            };
+            xhr.onerror = function () { failure('Не вдалося з’єднатися з TorBox.'); };
+            xhr.ontimeout = function () { failure('TorBox не відповів вчасно.'); };
+            xhr.send();
+        } catch (e) { failure('Не вдалося виконати запит у цій версії Lampa.'); }
     }
-
-    function normalizeList(response) {
+    function extractItems(response) {
         if (Array.isArray(response)) return response;
         if (response && Array.isArray(response.data)) return response.data;
         if (response && response.data && Array.isArray(response.data.torrents)) return response.data.torrents;
         return [];
     }
-
-    function openPlayer(url, title) {
-        if (!url || typeof url !== 'string') {
-            notify('TorBox не повернув посилання для відтворення.');
-            return;
-        }
-        // Use Lampa's normal player route so Tizen playback is handled by Lampa.
-        try {
-            var card = {
-                title: title || 'TorBox',
-                url: url,
-                method: 'play',
-                source: 'TorBox',
-                quality: '未知'
-            };
-            if (Lampa.Player && Lampa.Player.play) Lampa.Player.play(card);
-            else if (Lampa.Player && Lampa.Player.open) Lampa.Player.open(card);
-            else notify('Посилання отримано, але ця версія Lampa не має сумісного методу запуску.');
-        } catch (e) {
-            notify('Не вдалося запустити відео в плеєрі Lampa.');
-        }
-    }
-
-    function launchTorrent(torrent, title) {
-        var id = torrent.id || torrent.torrent_id;
-        if (!id) {
-            notify('У записі TorBox немає ID торрента.');
-            return;
-        }
-        // TorBox requestdl returns a temporary, account-authorized download/play URL.
-        request(API + '/torrents/requestdl?id=' + encodeURIComponent(id) + '&token=' + encodeURIComponent(key()), 'GET', {}, function (response) {
+    function playItem(item) {
+        var id = item.id || item.torrent_id;
+        var title = item.name || item.filename || 'TorBox';
+        if (!id) { notice('У цього запису немає ID торрента.'); return; }
+        request('/torrents/requestdl?id=' + encodeURIComponent(id) + '&token=' + encodeURIComponent(getKey()), function (response) {
             var url = response && (response.data || response.url || response.download_url);
-            if (typeof url === 'object' && url) url = url.url || url.download_url;
-            if (url) openPlayer(url, title || torrent.name || torrent.filename);
-            else notify((response && response.detail) || 'TorBox не повернув посилання. Перевір статус торрента у своєму акаунті.');
-        });
+            if (url && typeof url === 'object') url = url.url || url.download_url;
+            if (!url || typeof url !== 'string') { notice('TorBox не повернув посилання для відтворення.'); return; }
+            try {
+                if (Lampa.Player && typeof Lampa.Player.play === 'function') Lampa.Player.play({ title: title, url: url, source: 'TorBox', method: 'play' });
+                else notice('У цій версії Lampa не знайдено сумісний метод запуску плеєра.');
+            } catch (e) { notice('Не вдалося запустити відео в Lampa.'); }
+        }, notice);
     }
-
-    function addSettings() {
-        if (!Lampa.SettingsApi || !Lampa.SettingsApi.addParam) return;
-        Lampa.SettingsApi.addParam({
-            component: 'torbox_lampa',
-            param: {
-                name: 'torbox_lampa_api_key',
-                type: 'input',
-                placeholder: 'Вставте API key TorBox',
-                values: ''
-            },
-            field: {
-                name: 'TorBox API key',
-                description: 'Ключ з torbox.app/settings → Account. Зберігається локально в налаштуваннях Lampa на цьому пристрої.'
-            },
-            onChange: function (value) {
-                Lampa.Storage.set(settings.api_key, (value || '').trim());
-                notify('Ключ TorBox збережено на цьому пристрої.');
-            }
-        });
-    }
-
-    function buildPage() {
-        var page = {
-            component: 'torbox_lampa',
-            name: 'TorBox',
-            html: $('<div class="torbox-lampa-page"><div class="torbox-lampa-head"><div class="torbox-lampa-title">TorBox</div><div class="torbox-lampa-sub">Ваші торренти з акаунта TorBox</div></div><div class="torbox-lampa-actions"><div class="selector torbox-lampa-refresh">Оновити список</div><div class="selector torbox-lampa-settings">Налаштування API key</div></div><div class="torbox-lampa-status">Завантаження…</div><div class="torbox-lampa-list"></div></div>'),
-            create: function () {
-                var self = this;
-                this.activity.loader(true);
-                this.render = function () {
-                    var list = self.html.find('.torbox-lampa-list').empty();
-                    var status = self.html.find('.torbox-lampa-status');
-                    if (!key()) {
-                        status.text('Спочатку додайте API key у Налаштування → TorBox.');
-                        self.activity.loader(false);
-                        return;
-                    }
-                    status.text('Завантаження списку TorBox…');
-                    request(API + '/torrents/mylist?bypass_cache=true', 'GET', {}, function (response) {
-                        var items = normalizeList(response);
-                        self.activity.loader(false);
-                        list.empty();
-                        if (!items.length) {
-                            status.text((response && response.detail) || 'Список порожній або TorBox не повернув торренти.');
-                            return;
-                        }
-                        status.text('Знайдено: ' + items.length);
-                        items.forEach(function (item) {
-                            var name = item.name || item.filename || ('Торрент #' + item.id);
-                            var state = item.download_state || item.status || '';
-                            var row = $('<div class="selector torbox-lampa-item"><div class="torbox-lampa-item-title"></div><div class="torbox-lampa-item-state"></div></div>');
-                            row.find('.torbox-lampa-item-title').text(name);
-                            row.find('.torbox-lampa-item-state').text(state);
-                            row.on('hover:enter', function () { launchTorrent(item, name); });
-                            row.on('hover:click', function () { launchTorrent(item, name); });
-                            list.append(row);
-                        });
-                    }, function (message) {
-                        self.activity.loader(false);
-                        status.text(message + ' — перевірте API key і доступ до TorBox.');
-                    });
-                };
-                self.html.find('.torbox-lampa-refresh').on('hover:enter', function () { self.render(); });
-                self.html.find('.torbox-lampa-settings').on('hover:enter', function () {
-                    notify('Відкрийте Налаштування Lampa → TorBox та вставте API key.');
+    function makePage() {
+        var html = $('<div style="padding:2em;color:#fff"><div style="font-size:2em;font-weight:bold">TorBox</div><div class="tb-status" style="margin:1em 0;opacity:.8"></div><div class="selector tb-refresh" style="padding:1em;background:rgba(255,255,255,.12);margin-bottom:1em">Оновити список</div><div class="tb-items"></div></div>');
+        function load() {
+            var status = html.find('.tb-status');
+            var list = html.find('.tb-items').empty();
+            if (!getKey()) { status.text('Спочатку введіть API key: Налаштування → TorBox.'); return; }
+            status.text('Завантаження списку TorBox…');
+            request('/torrents/mylist?bypass_cache=true', function (response) {
+                var items = extractItems(response);
+                if (!items.length) { status.text('Список порожній або формат відповіді TorBox змінився.'); return; }
+                status.text('Знайдено: ' + items.length + '. Виберіть запис для запуску.');
+                items.forEach(function (item) {
+                    var name = item.name || item.filename || ('Торрент #' + (item.id || '?'));
+                    var row = $('<div class="selector" style="padding:1em;margin:.5em 0;background:rgba(255,255,255,.08)"><div class="tb-name"></div><small class="tb-state" style="opacity:.65"></small></div>');
+                    row.find('.tb-name').text(name);
+                    row.find('.tb-state').text(item.download_state || item.status || '');
+                    row.on('hover:enter hover:click click', function () { playItem(item); });
+                    list.append(row);
                 });
-                this.render();
-            },
-            destroy: function () {
-                this.html.remove();
-            }
-        };
-        return page;
+            }, function (message) { status.text(message); });
+        }
+        html.find('.tb-refresh').on('hover:enter hover:click click', load);
+        load();
+        return { html: html, create: function () {}, render: function () { return html; }, destroy: function () { html.remove(); } };
     }
-
+    function registerSettings() {
+        if (!Lampa.SettingsApi) { console.log('[TorBox Lampa] SettingsApi unavailable'); return; }
+        // This is the documented Lampa pattern: register the section first, then its parameter.
+        Lampa.SettingsApi.addComponent({ component: COMPONENT, name: 'TorBox' });
+        Lampa.SettingsApi.addParam({
+            component: COMPONENT,
+            param: { name: KEY_NAME, type: 'input', default: '', placeholder: 'Вставте API key TorBox' },
+            field: { name: 'API-ключ TorBox', description: 'Вставте ключ зі сторінки TorBox Account. Ключ зберігається в налаштуваннях Lampa на цьому пристрої.' },
+            onChange: function (value) {
+                try { Lampa.Storage.set(KEY_NAME, String(value || '').trim()); notice('API key TorBox збережено.'); }
+                catch (e) { notice('Не вдалося зберегти API key.'); }
+            }
+        });
+    }
     function init() {
-        if (!window.Lampa || !Lampa.Component || !Lampa.Activity) return;
-        addSettings();
-
-        if (Lampa.Template && Lampa.Template.add) {
-            Lampa.Template.add('torbox_lampa_style', '<style>' +
-                '.torbox-lampa-page{padding:2em;color:#fff}.torbox-lampa-head{margin-bottom:1.4em}.torbox-lampa-title{font-size:2.2em;font-weight:700}.torbox-lampa-sub{opacity:.7;margin-top:.4em}.torbox-lampa-actions{display:flex;gap:1em;margin-bottom:1em}.torbox-lampa-actions .selector{padding:.8em 1.2em;background:rgba(255,255,255,.09);border-radius:.4em}.torbox-lampa-status{opacity:.8;margin:1em 0}.torbox-lampa-item{padding:1em;margin:.45em 0;background:rgba(255,255,255,.07);border-radius:.35em}.torbox-lampa-item-title{font-size:1.15em}.torbox-lampa-item-state{font-size:.85em;opacity:.65;margin-top:.35em}' +
-                '</style>');
-        }
-        Lampa.Component.add('torbox_lampa', buildPage);
-
-        // Add a sidebar/menu item where supported by the current Lampa build.
-        if (Lampa.Manifest && Lampa.Manifest.plugins) {
-            Lampa.Manifest.plugins(PLUGIN_ID, 'TorBox');
-        }
-        Lampa.Listener.follow('app', function (event) {
-            if (event.type === 'ready') {
-                try {
-                    Lampa.Menu.add({
-                        title: 'TorBox',
-                        name: 'torbox_lampa',
-                        icon: 'https://www.torbox.app/favicon.ico',
-                        url: '',
-                        onSelect: function () {
-                            Lampa.Activity.push({
-                                url: '',
-                                title: 'TorBox',
-                                component: 'torbox_lampa'
-                            });
-                        }
-                    });
-                } catch (e) {}
+        if (!window.Lampa) return;
+        try { registerSettings(); } catch (e) { console.log('[TorBox Lampa] Settings error:', e); }
+        try {
+            if (Lampa.Component && Lampa.Component.add) {
+                Lampa.Component.add(COMPONENT, function () { return makePage(); });
             }
-        });
+        } catch (e) { console.log('[TorBox Lampa] Component error:', e); }
+        function addMenu() {
+            try {
+                if (Lampa.Menu && Lampa.Menu.addButton) {
+                    Lampa.Menu.addButton('', 'TorBox', function () {
+                        Lampa.Activity.push({ title: 'TorBox', component: COMPONENT });
+                    });
+                } else if (Lampa.Menu && Lampa.Menu.add) {
+                    Lampa.Menu.add({ title: 'TorBox', name: COMPONENT, onSelect: function () { Lampa.Activity.push({ title: 'TorBox', component: COMPONENT }); } });
+                }
+            } catch (e) { console.log('[TorBox Lampa] Menu error:', e); }
+        }
+        addMenu();
     }
-
     if (window.appready) init();
-    else if (window.Lampa && Lampa.Listener) {
-        Lampa.Listener.follow('app', function (event) {
-            if (event.type === 'ready') init();
-        });
-    }
+    else if (window.Lampa && Lampa.Listener && Lampa.Listener.follow) Lampa.Listener.follow('app', function (event) { if (event.type === 'ready') init(); });
+    else document.addEventListener('DOMContentLoaded', init);
 })();
