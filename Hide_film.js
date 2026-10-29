@@ -30,3 +30,368 @@
     function unhideKey(k) {
         Lampa.Storage.set(KEY, getList().filter(function (x) { return x !== k; }));
     }
+
+    // ===== ФІЛЬТР ПО КРАЇНІ =====
+    function countryFilterOn() {
+        var v = Lampa.Storage.get('hide_ru', 'true');
+        return v === true || v === 'true';
+    }
+
+    var cache = Lampa.Storage.get('hide_cn_cache', '{}');
+    if (!cache || typeof cache !== 'object' || Array.isArray(cache)) cache = {};
+    var pending = {};
+
+    function inBlocked(code) { return BLOCKED.indexOf(code) !== -1; }
+
+    // true / false / null (країна невідома)
+    function countryBlocked(d) {
+        var oc = d.origin_country;
+        if (Array.isArray(oc) && oc.length) return oc.some(inBlocked);
+        var pc = d.production_countries;
+        if (Array.isArray(pc) && pc.length) {
+            return pc.some(function (c) { return inBlocked(c.iso_3166_1); });
+        }
+        return null;
+    }
+
+    function fetchCountry(d, k) {
+        if (pending[k]) return;
+        pending[k] = 1;
+        try {
+            var url = Lampa.TMDB.api((isTv(d) ? 'tv/' : 'movie/') + d.id +
+                      '?api_key=' + Lampa.TMDB.key() + '&language=en');
+            $.getJSON(url, function (r) {
+                var bad = countryBlocked(r) === true;
+                cache[k] = bad ? 1 : 0;
+                Lampa.Storage.set('hide_cn_cache', cache);
+                if (bad) sweep();
+            });
+        } catch (e) { console.log('[hide_movie] tmdb', e); }
+    }
+
+    function isBlockedCountry(d) {
+        if (!countryFilterOn() || !d || !d.id) return false;
+        var r = countryBlocked(d);
+        if (r !== null) return r;
+        var k = key(d);
+        if (k in cache) return cache[k] === 1;
+        fetchCountry(d, k);
+        return false;
+    }
+
+    // ===== ПОШУК ДАНИХ КАРТКИ =====
+    function looksLikeMovie(v) {
+        return v && typeof v === 'object' && v.id &&
+            (v.title || v.name || v.original_title || v.original_name);
+    }
+
+    function fromValue(v) {
+        if (looksLikeMovie(v)) return v;
+        if (v && typeof v === 'object') {
+            var sub = [v.data, v.card_data, v.item, v.card, v.movie];
+            for (var i = 0; i < sub.length; i++) if (looksLikeMovie(sub[i])) return sub[i];
+        }
+        return null;
+    }
+
+    function cardData(el) {
+        if (!el) return null;
+        var found = null, k;
+        try {
+            var jd = $(el).data() || {};
+            for (k in jd) { found = fromValue(jd[k]); if (found) return found; }
+        } catch (e) {}
+        for (k in el) {
+            try { found = fromValue(el[k]); if (found) return found; } catch (e) {}
+        }
+        return null;
+    }
+
+    function debugInfo(el) {
+        if (!el) return 'Картку не визначено';
+        var own = [], jd = [];
+        try { for (var k in el) if (/card|data|item|movie/i.test(k)) own.push(k); } catch (e) {}
+        try { jd = Object.keys($(el).data() || {}); } catch (e) {}
+        return 'Дані не знайдено. el: [' + own.join(',') + '] jq: [' + jd.join(',') + ']';
+    }
+
+    // ===== ПРИБИРАННЯ КАРТОК =====
+    function sweep() {
+        $('.card').each(function () {
+            var d = cardData(this);
+            if (d && (isHidden(d) || isBlockedCountry(d))) $(this).remove();
+        });
+    }
+
+    var timer;
+    function startObserver() {
+        new MutationObserver(function () {
+            clearTimeout(timer);
+            timer = setTimeout(sweep, 100);
+        }).observe(document.body, { childList: true, subtree: true });
+    }
+
+    // ===== ПУНКТ "СХОВАТИ" У МЕНЮ КАРТКИ =====
+    function track(e) {
+        var c = $(e.target).closest('.card')[0];
+        if (c) { lastCard = c; lastTime = Date.now(); }
+    }
+    document.addEventListener('touchstart', track, true);
+    document.addEventListener('mousedown', track, true);
+    document.addEventListener('contextmenu', track, true);
+
+    function currentCard() {
+        var f = $('.card.focus').last()[0];
+        if (f) return f;
+        if (lastCard && Date.now() - lastTime < 8000) return lastCard;
+        return null;
+    }
+
+    function patchSelect() {
+        if (!Lampa.Select || Lampa.Select._hide_patched) return;
+        var orig = Lampa.Select.show;
+        Lampa.Select._hide_patched = true;
+
+        Lampa.Select.show = function (params) {
+            try {
+                if (params && Array.isArray(params.items) && params.items.length &&
+                    !params.items.some(function (i) { return i.hide_movie; })) {
+
+                    var el = currentCard();
+                    if (el) {
+                        var d = cardData(el);
+                        var $el = $(el);
+                        if (d) {
+                            params.items.push({
+                                title: isHidden(d) ? 'Показувати фільм' : 'Сховати фільм',
+                                hide_movie: true,
+                                onSelect: function () {
+                                    if (isHidden(d)) {
+                                        unhide(d);
+                                        Lampa.Noty.show('Фільм знову буде показуватись');
+                                    } else {
+                                        hide(d);
+                                        $el.remove();
+                                        Lampa.Noty.show('Фільм сховано');
+                                    }
+                                }
+                            });
+                        } else {
+                            params.items.push({
+                                title: 'Сховати: діагностика',
+                                hide_movie: true,
+                                onSelect: function () { Lampa.Noty.show(debugInfo(el)); }
+                            });
+                        }
+                    }
+                }
+            } catch (e) { console.log('[hide_movie]', e); }
+            return orig.apply(this, arguments);
+        };
+    }
+
+    // ===== КНОПКА НА СТОРІНЦІ ФІЛЬМУ =====
+    Lampa.Listener.follow('full', function (e) {
+        if (e.type !== 'complite') return;
+
+        var movie = e.data.movie;
+        var render = e.object.activity.render();
+        var container = render.find('.full-start-new__buttons, .full-start__buttons').eq(0);
+        if (!container.length || render.find('.button--hide-movie').length) return;
+
+        var btn = $('<div class="full-start__button selector button--hide-movie"><span></span></div>');
+        function refresh() { btn.find('span').text(isHidden(movie) ? 'Показувати' : 'Сховати'); }
+
+        btn.on('hover:enter', function () {
+            if (isHidden(movie)) {
+                unhide(movie);
+                Lampa.Noty.show('Фільм знову буде показуватись');
+            } else {
+                hide(movie);
+                Lampa.Noty.show('Фільм сховано');
+                Lampa.Activity.backward();
+            }
+            refresh();
+        });
+
+        refresh();
+        container.append(btn);
+    });
+
+    // ===== СПИСОК СХОВАНИХ ФІЛЬМІВ =====
+    // Назви зберігаються в кеші, щоб не питати TMDB щоразу.
+    function getTitles() {
+        var t = Lampa.Storage.get(TITLES_KEY, '{}');
+        return (t && typeof t === 'object' && !Array.isArray(t)) ? t : {};
+    }
+
+    function parseKey(k) {
+        var p = String(k).split(':');
+        return { type: p[0] === 'tv' ? 'tv' : 'movie', id: p[1] };
+    }
+
+    function loading(on) {
+        try {
+            if (on) { if (Lampa.Loading && Lampa.Loading.start) Lampa.Loading.start(function () {}); }
+            else if (Lampa.Loading && Lampa.Loading.stop) Lampa.Loading.stop();
+        } catch (e) {}
+    }
+
+    function backToSettings() {
+        try { Lampa.Controller.toggle('settings_component'); } catch (e) {}
+    }
+
+    // Підтягує назви тих фільмів, яких ще немає в кеші (по 5 запитів одночасно)
+    function loadTitles(keys, done) {
+        var titles = getTitles();
+        var queue = keys.filter(function (k) { return !titles[k]; });
+        if (!queue.length) return done(titles);
+
+        var active = 0, finished = 0, total = queue.length, idx = 0;
+        var lang = Lampa.Storage.get('language', 'uk');
+
+        function finishOne() {
+            finished++;
+            active--;
+            if (finished >= total) {
+                Lampa.Storage.set(TITLES_KEY, titles);
+                done(titles);
+            } else {
+                next();
+            }
+        }
+
+        function next() {
+            while (active < 5 && idx < queue.length) {
+                (function (k) {
+                    active++;
+                    idx++;
+                    var p = parseKey(k);
+                    try {
+                        var url = Lampa.TMDB.api(p.type + '/' + p.id +
+                            '?api_key=' + Lampa.TMDB.key() + '&language=' + lang);
+                        $.getJSON(url, function (r) {
+                            var name = r.title || r.name || r.original_title || r.original_name;
+                            var date = r.release_date || r.first_air_date || '';
+                            var year = date ? ' (' + date.slice(0, 4) + ')' : '';
+                            if (name) titles[k] = name + year + (p.type === 'tv' ? ' · серіал' : '');
+                            finishOne();
+                        }).fail(function () { finishOne(); });
+                    } catch (e) { finishOne(); }
+                })(queue[idx]);
+            }
+        }
+
+        next();
+    }
+
+    function labelOf(titles, k) {
+        return titles[k] || ((parseKey(k).type === 'tv' ? 'Серіал' : 'Фільм') + ' #' + parseKey(k).id);
+    }
+
+    function openHiddenList() {
+        var list = getList();
+        if (!list.length) {
+            Lampa.Noty.show('Схованих фільмів немає');
+            return;
+        }
+        loading(true);
+        loadTitles(list, function (titles) {
+            loading(false);
+            showHiddenList(titles);
+        });
+    }
+
+    function showHiddenList(titles) {
+        var list = getList();
+        if (!list.length) {
+            Lampa.Noty.show('Схованих фільмів більше немає');
+            return backToSettings();
+        }
+        var items = list.map(function (k) {
+            return { title: labelOf(titles, k), hkey: k };
+        });
+        items.sort(function (a, b) {
+            var x = a.title.toLowerCase(), y = b.title.toLowerCase();
+            return x < y ? -1 : (x > y ? 1 : 0);
+        });
+
+        Lampa.Select.show({
+            title: 'Сховані (' + items.length + ')',
+            items: items,
+            onSelect: function (a) { showHiddenActions(a.hkey, titles); },
+            onBack: backToSettings
+        });
+    }
+
+    function showHiddenActions(k, titles) {
+        var p = parseKey(k);
+        Lampa.Select.show({
+            title: labelOf(titles, k),
+            items: [
+                { title: 'Відкрити картку', act: 'open' },
+                { title: 'Показувати знову', act: 'unhide' },
+                { title: 'Назад до списку', act: 'back' }
+            ],
+            onSelect: function (a) {
+                if (a.act === 'open') {
+                    Lampa.Activity.push({
+                        url: '',
+                        component: 'full',
+                        id: p.id,
+                        method: p.type,
+                        card: { id: p.id },
+                        source: 'tmdb'
+                    });
+                } else if (a.act === 'unhide') {
+                    unhideKey(k);
+                    Lampa.Noty.show('Фільм знову буде показуватись');
+                    showHiddenList(titles);
+                } else {
+                    showHiddenList(titles);
+                }
+            },
+            onBack: function () { showHiddenList(titles); }
+        });
+    }
+
+    // ===== НАЛАШТУВАННЯ В LAMPA =====
+    try {
+        Lampa.SettingsApi.addParam({
+            component: 'more',
+            param: { name: 'hide_ru', type: 'trigger', default: true },
+            field: {
+                name: 'Ховати контент за країнами',
+                description: 'Країни виробництва: ' + BLOCKED.join(', ')
+            },
+            onChange: function () { sweep(); }
+        });
+    } catch (e) {}
+
+    try {
+        Lampa.SettingsApi.addParam({
+            component: 'more',
+            param: { name: 'hide_movie_open', type: 'static' },
+            field: {
+                name: 'Сховані фільми',
+                description: 'Відкрити список схованих. Повернути можна кожен окремо'
+            },
+            onRender: function (item) {
+                item.on('hover:enter', function () {
+                    openHiddenList();
+                });
+            }
+        });
+    } catch (e) {}
+
+    // ===== ЗАПУСК =====
+    function init() {
+        patchSelect();
+        startObserver();
+        sweep();
+        setInterval(sweep, 1500);
+    }
+
+    if (window.appready) init();
+    else Lampa.Listener.follow('app', function (e) { if (e.type === 'ready') init(); });
+})();
