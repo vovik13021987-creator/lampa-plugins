@@ -23,12 +23,117 @@
         var l = getList();
         if (l.indexOf(key(d)) === -1) l.push(key(d));
         Lampa.Storage.set(KEY, l);
+        mark(key(d), 1);
     }
     function unhide(d) {
         unhideKey(key(d));
     }
     function unhideKey(k) {
         Lampa.Storage.set(KEY, getList().filter(function (x) { return x !== k; }));
+        mark(k, 0);
+    }
+
+    // ===== СИНХРОНІЗАЦІЯ МІЖ РІЗНИМИ LAMPA =====
+    // Список зберігається в jsonblob.com за вашим кодом. Для кожного фільму
+    // запам'ятовується час останньої зміни, тому "показувати знову" теж синхронізується.
+    var TS_KEY = 'hide_movie_ts';
+    var SYNC_ID_KEY = 'hide_sync_id';
+    var syncTimer = null, syncBusy = false;
+
+    function getTs() {
+        var t = Lampa.Storage.get(TS_KEY, '{}');
+        return (t && typeof t === 'object' && !Array.isArray(t)) ? t : {};
+    }
+    function mark(k, h) {
+        var ts = getTs();
+        ts[k] = { t: Date.now(), h: h ? 1 : 0 };
+        Lampa.Storage.set(TS_KEY, ts);
+        scheduleSync();
+    }
+    function syncId() {
+        var v = String(Lampa.Storage.get(SYNC_ID_KEY, '') || '').trim();
+        if (!v) return '';
+        v = v.split('?')[0].replace(/\/+$/, '');
+        var parts = v.split('/');
+        return parts[parts.length - 1];
+    }
+    function scheduleSync() {
+        if (!syncId()) return;
+        clearTimeout(syncTimer);
+        syncTimer = setTimeout(function () { syncNow(); }, 3000);
+    }
+    function blobRequest(method, body, ok, fail) {
+        var x = new XMLHttpRequest();
+        x.open(method, 'https://jsonblob.com/api/jsonBlob/' + encodeURIComponent(syncId()), true);
+        x.setRequestHeader('Accept', 'application/json');
+        if (body) x.setRequestHeader('Content-Type', 'application/json');
+        x.timeout = 20000;
+        x.onload = function () {
+            if (x.status >= 200 && x.status < 300) ok(x.responseText);
+            else fail('HTTP ' + x.status);
+        };
+        x.onerror = function () { fail('мережа'); };
+        x.ontimeout = function () { fail('таймаут'); };
+        x.send(body || null);
+    }
+    function syncNow(cb) {
+        cb = cb || function () {};
+        if (!syncId()) return cb('немає коду синхронізації');
+        if (syncBusy) return cb('синхронізація вже йде');
+        syncBusy = true;
+
+        blobRequest('GET', null, function (txt) {
+            var remote = {};
+            try {
+                var j = JSON.parse(txt);
+                if (j && j.items && typeof j.items === 'object') remote = j.items;
+            } catch (e) {}
+
+            var local = getTs();
+            var list = getList();
+            var i, k;
+            // старі записи без часу вважаємо давніми
+            for (i = 0; i < list.length; i++) if (!local[list[i]]) local[list[i]] = { t: 1, h: 1 };
+
+            var merged = {}, changedRemote = false;
+            for (k in local) if (local.hasOwnProperty(k)) merged[k] = local[k];
+            for (k in remote) {
+                if (!remote.hasOwnProperty(k)) continue;
+                var r = remote[k];
+                if (!r || typeof r.t !== 'number') continue;
+                if (!merged[k] || r.t > merged[k].t) merged[k] = { t: r.t, h: r.h ? 1 : 0 };
+            }
+            for (k in merged) {
+                if (!merged.hasOwnProperty(k)) continue;
+                if (!remote[k] || remote[k].t !== merged[k].t || (remote[k].h ? 1 : 0) !== (merged[k].h ? 1 : 0)) {
+                    changedRemote = true;
+                    break;
+                }
+            }
+
+            var newList = [];
+            for (k in merged) if (merged.hasOwnProperty(k) && merged[k].h) newList.push(k);
+            var oldList = getList();
+            var changedLocal = newList.length !== oldList.length ||
+                newList.some(function (x) { return oldList.indexOf(x) === -1; });
+
+            Lampa.Storage.set(TS_KEY, merged);
+            if (changedLocal) {
+                Lampa.Storage.set(KEY, newList);
+                sweep();
+            }
+
+            var done = function () { syncBusy = false; cb(null, changedLocal, changedRemote); };
+            if (changedRemote) {
+                blobRequest('PUT', JSON.stringify({ v: 2, items: merged }), done, function (e) {
+                    syncBusy = false;
+                    cb('запис: ' + e);
+                });
+            } else done();
+        }, function (e) {
+            syncBusy = false;
+            cb('читання: ' + e);
+        });
     }
 
     // ===== ФІЛЬТР ПО КРАЇНІ =====
@@ -384,12 +489,43 @@
         });
     } catch (e) {}
 
+    try {
+        Lampa.SettingsApi.addParam({
+            component: 'more',
+            param: { name: 'hide_sync_id', type: 'input', values: '', default: '' },
+            field: {
+                name: 'Код синхронізації схованих',
+                description: 'jsonblob.com: створіть запис з текстом [] і вставте сюди адресу чи ID. Той самий код вводьте в усіх Lampa'
+            },
+            onChange: function () { scheduleSync(); }
+        });
+    } catch (e) {}
+
+    try {
+        Lampa.SettingsApi.addParam({
+            component: 'more',
+            param: { name: 'hide_sync_now', type: 'static' },
+            field: { name: 'Синхронізувати сховані зараз', description: 'Звіряє список з іншими Lampa' },
+            onRender: function (item) {
+                item.on('hover:enter', function () {
+                    Lampa.Noty.show('Синхронізація…');
+                    syncNow(function (err, changedLocal) {
+                        if (err) Lampa.Noty.show('Синхронізація: ' + err);
+                        else Lampa.Noty.show(changedLocal ? 'Список оновлено з інших Lampa' : 'Усе актуально');
+                    });
+                });
+            }
+        });
+    } catch (e) {}
+
     // ===== ЗАПУСК =====
     function init() {
         patchSelect();
         startObserver();
         sweep();
         setInterval(sweep, 1500);
+        setTimeout(function () { syncNow(); }, 4000);
+        setInterval(function () { syncNow(); }, 120000);
     }
 
     if (window.appready) init();
