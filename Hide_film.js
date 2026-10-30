@@ -76,6 +76,27 @@
         x.ontimeout = function () { fail('таймаут'); };
         x.send(body || null);
     }
+    // Створює новий запис на jsonblob.com і зберігає його код у налаштуваннях
+    function createBlob(cb) {
+        var x = new XMLHttpRequest();
+        x.open('POST', 'https://jsonblob.com/api/jsonBlob', true);
+        x.setRequestHeader('Accept', 'application/json');
+        x.setRequestHeader('Content-Type', 'application/json');
+        x.timeout = 20000;
+        x.onload = function () {
+            if (x.status < 200 || x.status >= 300) return cb('HTTP ' + x.status);
+            var loc = '';
+            try { loc = x.getResponseHeader('Location') || x.getResponseHeader('X-jsonblob') || ''; } catch (e) {}
+            var id = String(loc).split('?')[0].replace(/\/+$/, '').split('/').pop();
+            if (!id) return cb('сервер не повернув код (заголовок недоступний)');
+            Lampa.Storage.set(SYNC_ID_KEY, id);
+            cb(null, id);
+        };
+        x.onerror = function () { cb('мережа'); };
+        x.ontimeout = function () { cb('таймаут'); };
+        x.send(JSON.stringify({ v: 2, items: {} }));
+    }
+
     function syncNow(cb) {
         cb = cb || function () {};
         if (!syncId()) return cb('немає коду синхронізації');
@@ -498,6 +519,32 @@
                 description: 'jsonblob.com: створіть запис з текстом [] і вставте сюди адресу чи ID. Той самий код вводьте в усіх Lampa'
             },
             onChange: function () { scheduleSync(); }
+        });
+    } catch (e) {}
+
+    try {
+        Lampa.SettingsApi.addParam({
+            component: 'more',
+            param: { name: 'hide_sync_create', type: 'static' },
+            field: {
+                name: 'Створити код синхронізації',
+                description: 'Автоматично створює запис на jsonblob.com і показує код. Потім введіть той самий код в інших Lampa'
+            },
+            onRender: function (item) {
+                item.on('hover:enter', function () {
+                    Lampa.Noty.show('Створюю код…');
+                    createBlob(function (err, id) {
+                        if (err) return Lampa.Noty.show('Не вдалося створити код: ' + err);
+                        Lampa.Select.show({
+                            title: 'Ваш код синхронізації',
+                            items: [{ title: id }, { title: 'Запишіть його й введіть в інших Lampa' }],
+                            onSelect: function () { backToSettings(); },
+                            onBack: backToSettings
+                        });
+                        syncNow();
+                    });
+                });
+            }
         });
     } catch (e) {}
 
