@@ -48,16 +48,14 @@
 
     // ---- Запасний спосіб: ховаємо рядки з замком прямо в готовому меню (DOM) ----
     function lockedRowFor(textNode) {
-        var el = textNode.parentNode, row = el;
+        var row = textNode.parentNode;
         // піднімаємось до найбільшого предка, текст якого дорівнює назві (це весь рядок меню)
         while (row && row.parentNode && row.parentNode !== document.body &&
                norm(row.parentNode.textContent) === norm(textNode.nodeValue)) {
             row = row.parentNode;
         }
         if (!row || row === document.body) return null;
-        // у рядка має бути значок замка (svg, зображення чи елемент з "lock" у класі)
-        var hasIcon = row.querySelector && row.querySelector('svg, img, [class*="lock"]');
-        return hasIcon ? row : null;
+        return row;
     }
 
     function domSweep() {
@@ -74,7 +72,7 @@
                 headers.push(n.parentNode);
             }
         }
-        if (!rows.length) return;
+        if (rows.length < 3) return;
         for (var i = 0; i < rows.length; i++) rows[i].style.display = 'none';
         for (var j = 0; j < headers.length; j++) headers[j].style.display = 'none';
         try { Lampa.Noty.show('NoLocks: приховано пунктів ' + rows.length); } catch (e) {}
@@ -85,7 +83,10 @@
         if (!window.MutationObserver) return;
         new MutationObserver(function () {
             clearTimeout(domTimer);
-            domTimer = setTimeout(domSweep, 200);
+            domTimer = setTimeout(function () {
+                domSweep();
+                setTimeout(domSweep, 500);
+            }, 200);
         }).observe(document.body, { childList: true, subtree: true });
     }
 
@@ -116,7 +117,7 @@
     function start() {
         patch();
         startDomWatch();
-        try { Lampa.Noty.show('NoLocks v4 запущено'); } catch (e) {}
+        try { Lampa.Noty.show('NoLocks v5 запущено'); } catch (e) {}
     }
 
     if (window.appready) start();
