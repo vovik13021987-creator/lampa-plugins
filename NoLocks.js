@@ -45,6 +45,50 @@
         } catch (e) {}
     }
 
+
+    // ---- Запасний спосіб: ховаємо рядки з замком прямо в готовому меню (DOM) ----
+    function lockedRowFor(textNode) {
+        var el = textNode.parentNode, row = el;
+        // піднімаємось до найбільшого предка, текст якого дорівнює назві (це весь рядок меню)
+        while (row && row.parentNode && row.parentNode !== document.body &&
+               norm(row.parentNode.textContent) === norm(textNode.nodeValue)) {
+            row = row.parentNode;
+        }
+        if (!row || row === document.body) return null;
+        // у рядка має бути значок замка (svg, зображення чи елемент з "lock" у класі)
+        var hasIcon = row.querySelector && row.querySelector('svg, img, [class*="lock"]');
+        return hasIcon ? row : null;
+    }
+
+    function domSweep() {
+        if (premium() || !document.body || !document.createTreeWalker) return;
+        var walker = document.createTreeWalker(document.body, 4, null, false);
+        var rows = [], headers = [], n;
+        while ((n = walker.nextNode())) {
+            var t = norm(n.nodeValue);
+            if (!t) continue;
+            if (TITLES.indexOf(t) !== -1) {
+                var row = lockedRowFor(n);
+                if (row && row.style.display !== 'none') rows.push(row);
+            } else if (t === 'статус') {
+                headers.push(n.parentNode);
+            }
+        }
+        if (!rows.length) return;
+        for (var i = 0; i < rows.length; i++) rows[i].style.display = 'none';
+        for (var j = 0; j < headers.length; j++) headers[j].style.display = 'none';
+        try { Lampa.Noty.show('NoLocks: приховано пунктів ' + rows.length); } catch (e) {}
+    }
+
+    var domTimer = null;
+    function startDomWatch() {
+        if (!window.MutationObserver) return;
+        new MutationObserver(function () {
+            clearTimeout(domTimer);
+            domTimer = setTimeout(domSweep, 200);
+        }).observe(document.body, { childList: true, subtree: true });
+    }
+
     function patch() {
         if (!Lampa.Select || Lampa.Select._nolocks_patched) return;
         var orig = Lampa.Select.show;
@@ -71,7 +115,8 @@
 
     function start() {
         patch();
-        try { Lampa.Noty.show('NoLocks v3 запущено'); } catch (e) {}
+        startDomWatch();
+        try { Lampa.Noty.show('NoLocks v4 запущено'); } catch (e) {}
     }
 
     if (window.appready) start();
