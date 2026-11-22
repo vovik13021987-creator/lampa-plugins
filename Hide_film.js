@@ -34,10 +34,12 @@
     }
 
     // ===== СИНХРОНІЗАЦІЯ МІЖ РІЗНИМИ LAMPA =====
-    // Список зберігається в jsonblob.com за вашим кодом. Для кожного фільму
-    // запам'ятовується час останньої зміни, тому "показувати знову" теж синхронізується.
+    // Спільний список лежить у файлі hide_sync.json у вашому репозиторії lampa-plugins.
+    // Читати його може будь-яка Lampa без токена, а записувати зміни - лише та, де введено токен.
+    // Для кожного фільму запам'ятовується час останньої зміни, тому "показувати знову" теж синхронізується.
     var TS_KEY = 'hide_movie_ts';
-    var SYNC_ID_KEY = 'hide_sync_id';
+    var TOKEN_KEY = 'hide_gh_token';
+    var GH_URL = 'https://api.github.com/repos/vovik13021987-creator/lampa-plugins/contents/hide_sync.json';
     var syncTimer = null, syncBusy = false;
 
     function getTs() {
@@ -50,65 +52,46 @@
         Lampa.Storage.set(TS_KEY, ts);
         scheduleSync();
     }
-    function syncId() {
-        var v = String(Lampa.Storage.get(SYNC_ID_KEY, '') || '').trim();
-        if (!v) return '';
-        v = v.split('?')[0].replace(/\/+$/, '');
-        var parts = v.split('/');
-        return parts[parts.length - 1];
+    function ghToken() {
+        return String(Lampa.Storage.get(TOKEN_KEY, '') || '').replace(/\s+/g, '');
     }
     function scheduleSync() {
-        if (!syncId()) return;
         clearTimeout(syncTimer);
         syncTimer = setTimeout(function () { syncNow(); }, 3000);
     }
-    function blobRequest(method, body, ok, fail) {
+    function ghRequest(method, body, ok, fail) {
         var x = new XMLHttpRequest();
-        x.open(method, 'https://jsonblob.com/api/jsonBlob/' + encodeURIComponent(syncId()), true);
-        x.setRequestHeader('Accept', 'application/json');
+        x.open(method, GH_URL + (method === 'GET' ? '?t=' + Date.now() : ''), true);
+        x.setRequestHeader('Accept', 'application/vnd.github+json');
+        var tk = ghToken();
+        if (tk) x.setRequestHeader('Authorization', 'Bearer ' + tk);
         if (body) x.setRequestHeader('Content-Type', 'application/json');
         x.timeout = 20000;
-        x.onload = function () {
-            if (x.status >= 200 && x.status < 300) ok(x.responseText);
-            else fail('HTTP ' + x.status);
-        };
+        x.onload = function () { ok(x.status, x.responseText); };
         x.onerror = function () { fail('мережа'); };
         x.ontimeout = function () { fail('таймаут'); };
         x.send(body || null);
     }
-    // Створює новий запис на jsonblob.com і зберігає його код у налаштуваннях
-    function createBlob(cb) {
-        var x = new XMLHttpRequest();
-        x.open('POST', 'https://jsonblob.com/api/jsonBlob', true);
-        x.setRequestHeader('Accept', 'application/json');
-        x.setRequestHeader('Content-Type', 'application/json');
-        x.timeout = 20000;
-        x.onload = function () {
-            if (x.status < 200 || x.status >= 300) return cb('HTTP ' + x.status);
-            var loc = '';
-            try { loc = x.getResponseHeader('Location') || x.getResponseHeader('X-jsonblob') || ''; } catch (e) {}
-            var id = String(loc).split('?')[0].replace(/\/+$/, '').split('/').pop();
-            if (!id) return cb('сервер не повернув код (заголовок недоступний)');
-            Lampa.Storage.set(SYNC_ID_KEY, id);
-            cb(null, id);
-        };
-        x.onerror = function () { cb('мережа'); };
-        x.ontimeout = function () { cb('таймаут'); };
-        x.send(JSON.stringify({ v: 2, items: {} }));
-    }
 
     function syncNow(cb) {
         cb = cb || function () {};
-        if (!syncId()) return cb('немає коду синхронізації');
         if (syncBusy) return cb('синхронізація вже йде');
         syncBusy = true;
 
-        blobRequest('GET', null, function (txt) {
-            var remote = {};
-            try {
-                var j = JSON.parse(txt);
-                if (j && j.items && typeof j.items === 'object') remote = j.items;
-            } catch (e) {}
+        ghRequest('GET', null, function (status, txt) {
+            var remote = {}, sha = null;
+
+            if (status === 200) {
+                try {
+                    var j = JSON.parse(txt);
+                    sha = j.sha;
+                    var d = JSON.parse(atob(String(j.content || '').replace(/\s+/g, '')));
+                    if (d && d.items && typeof d.items === 'object') remote = d.items;
+                } catch (e) {}
+            } else if (status !== 404) {
+                syncBusy = false;
+                return cb('читання: GitHub HTTP ' + status);
+            }
 
             var local = getTs();
             var list = getList();
@@ -144,13 +127,24 @@
                 sweep();
             }
 
-            var done = function () { syncBusy = false; cb(null, changedLocal, changedRemote); };
-            if (changedRemote) {
-                blobRequest('PUT', JSON.stringify({ v: 2, items: merged }), done, function (e) {
-                    syncBusy = false;
-                    cb('запис: ' + e);
-                });
-            } else done();
+            var finish = function (err) {
+                syncBusy = false;
+                cb(err || null, changedLocal, changedRemote);
+            };
+
+            if (!changedRemote) return finish();
+            if (!ghToken()) return finish('немає токена: зміни лише отримуються, а не надсилаються');
+
+            var body = {
+                message: 'hide sync',
+                content: btoa(JSON.stringify({ v: 2, items: merged }))
+            };
+            if (sha) body.sha = sha;
+            ghRequest('PUT', JSON.stringify(body), function (st) {
+                if (st === 200 || st === 201) finish();
+                else if (st === 401 || st === 403) finish('запис: токен не підходить (HTTP ' + st + ')');
+                else finish('запис: HTTP ' + st);
+            }, function (e) { finish('запис: ' + e); });
         }, function (e) {
             syncBusy = false;
             cb('читання: ' + e);
@@ -513,38 +507,12 @@
     try {
         Lampa.SettingsApi.addParam({
             component: 'more',
-            param: { name: 'hide_sync_id', type: 'input', values: '', default: '' },
+            param: { name: 'hide_gh_token', type: 'input', values: '', default: '' },
             field: {
-                name: 'Код синхронізації схованих',
-                description: 'Введіть код, створений в іншій Lampa. Якщо ще немає, натисніть нижче «Створити код синхронізації»'
+                name: 'GitHub-токен для синхронізації',
+                description: 'Потрібен там, де ви ховаєте фільми. Без токена Lampa лише отримує список з інших'
             },
             onChange: function () { scheduleSync(); }
-        });
-    } catch (e) {}
-
-    try {
-        Lampa.SettingsApi.addParam({
-            component: 'more',
-            param: { name: 'hide_sync_create', type: 'static' },
-            field: {
-                name: 'Створити код синхронізації',
-                description: 'Автоматично створює запис на jsonblob.com і показує код. Потім введіть той самий код в інших Lampa'
-            },
-            onRender: function (item) {
-                item.on('hover:enter', function () {
-                    Lampa.Noty.show('Створюю код…');
-                    createBlob(function (err, id) {
-                        if (err) return Lampa.Noty.show('Не вдалося створити код: ' + err);
-                        Lampa.Select.show({
-                            title: 'Ваш код синхронізації',
-                            items: [{ title: id }, { title: 'Запишіть його й введіть в інших Lampa' }],
-                            onSelect: function () { backToSettings(); },
-                            onBack: backToSettings
-                        });
-                        syncNow();
-                    });
-                });
-            }
         });
     } catch (e) {}
 
@@ -572,7 +540,7 @@
         sweep();
         setInterval(sweep, 1500);
         setTimeout(function () { syncNow(); }, 4000);
-        setInterval(function () { syncNow(); }, 120000);
+        setInterval(function () { syncNow(); }, 300000);
     }
 
     if (window.appready) init();
