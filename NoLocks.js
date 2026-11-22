@@ -39,9 +39,11 @@
                 if (params && Array.isArray(params.items) && !premium()) {
                     var kept = params.items.filter(function (i) { return !isLockedStatus(i); });
                     if (kept.length !== params.items.length) {
+                        var removed = params.items.length - kept.length;
                         // якщо статусів не лишилось, прибираємо й заголовок "Статус"
                         kept = kept.filter(function (i) { return norm(i && i.title) !== 'статус'; });
                         params.items = kept;
+                        try { Lampa.Noty.show('NoLocks: прибрано пунктів ' + removed); } catch (e2) {}
                     }
                 }
             } catch (e) {}
@@ -49,6 +51,11 @@
         };
     }
 
-    if (window.appready) patch();
-    else Lampa.Listener.follow('app', function (e) { if (e.type === 'ready') patch(); });
+    function start() {
+        patch();
+        try { Lampa.Noty.show('NoLocks v2 запущено'); } catch (e) {}
+    }
+
+    if (window.appready) start();
+    else Lampa.Listener.follow('app', function (e) { if (e.type === 'ready') start(); });
 })();
