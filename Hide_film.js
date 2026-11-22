@@ -516,7 +516,7 @@
             param: { name: 'hide_sync_id', type: 'input', values: '', default: '' },
             field: {
                 name: 'Код синхронізації схованих',
-                description: 'jsonblob.com: створіть запис з текстом [] і вставте сюди адресу чи ID. Той самий код вводьте в усіх Lampa'
+                description: 'Введіть код, створений в іншій Lampa. Якщо ще немає, натисніть нижче «Створити код синхронізації»'
             },
             onChange: function () { scheduleSync(); }
         });
