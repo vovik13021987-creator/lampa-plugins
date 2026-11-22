@@ -26,7 +26,23 @@
     function isLockedStatus(i) {
         if (!i) return false;
         if (i.lock) return true;
-        return TITLES.indexOf(norm(i.title)) !== -1;
+        var t = norm(i.title);
+        for (var k = 0; k < TITLES.length; k++) {
+            if (t === TITLES[k] || t.indexOf(TITLES[k]) === 0) return true;
+        }
+        return false;
+    }
+
+    // Показує, з чого складається меню, якщо нічого не вдалося прибрати
+    function debugMenu(params) {
+        try {
+            var names = [];
+            for (var n = 0; n < params.items.length; n++) {
+                var it = params.items[n] || {};
+                names.push(norm(it.title) + (it.lock ? ' [lock]' : '') + (it.items ? ' [items]' : ''));
+            }
+            Lampa.Noty.show('NoLocks меню "' + norm(params.title) + '": ' + names.join(' | '));
+        } catch (e) {}
     }
 
     function patch() {
@@ -44,6 +60,8 @@
                         kept = kept.filter(function (i) { return norm(i && i.title) !== 'статус'; });
                         params.items = kept;
                         try { Lampa.Noty.show('NoLocks: прибрано пунктів ' + removed); } catch (e2) {}
+                    } else if (params.title && norm(params.title) === 'дія') {
+                        debugMenu(params);
                     }
                 }
             } catch (e) {}
@@ -53,7 +71,7 @@
 
     function start() {
         patch();
-        try { Lampa.Noty.show('NoLocks v2 запущено'); } catch (e) {}
+        try { Lampa.Noty.show('NoLocks v3 запущено'); } catch (e) {}
     }
 
     if (window.appready) start();
